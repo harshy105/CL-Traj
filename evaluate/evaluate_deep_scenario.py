@@ -6,14 +6,11 @@ import torch.nn.functional as F
 from torch import Tensor
 from typing import Tuple, Optional, Dict, Any, List
 from copy import deepcopy
-from datasets.nuscenes.nuscenes_devkit.eval.prediction.compute_metrics import compute_metrics
-from datasets.nuscenes.nuscenes_devkit.eval.prediction.config import load_prediction_config
-from datasets.nuscenes.nuscenes_devkit.prediction import PredictHelper
-from datasets.nuscenes.nuscenes_devkit import NuScenes
 
 from network.net import Net
 from network.data_generator import TrajectoryGridMapDatasetLMDB
 from metrics.planning_metrics import PlanningMetric
+from metrics.metrics_io import build_metrics_record, MetricsWriter
 
 # from datasets.nuscenes.data_preprocessing.sample_creation import SampleCreator
 from utilities.transformation import (
@@ -24,23 +21,25 @@ from utilities.transformation import (
     vcs_to_local_tensor
 )
 from metrics.pred_metrics import PredMetric
+from metrics.offroad_metrics import OffroadMetric
+from metrics.comfort_metrics import ComfortMetric
 from utilities.utils import append_one_for_single_batch, combine_batch_elements_dim, change_device_of_dict, unbatch_and_pad
-from datasets.nuscenes.nuscenes_devkit.eval.prediction.splits import get_prediction_challenge_split
 from config.config import TARGET_PATH_DS, SAVE_PATH
 from config.train_config import TrainingConfig, DataStructureConfig, NetConfig
-from config.nuscenes_config import NuScenesPreprocessConfig
-from config.train_config import SampleOfInterest
 
 
 class DeepScenarioEvaluation:
     def __init__(
         self, data_split: str, save_dir: str, model_name: str, ckpt_name: str, 
         num_eval_recurr_steps: Optional[int] = None, batch_size: Optional[int] = None,
+        train_condition: Optional[str] = None, eval_reactive: Optional[bool] = None,
     ) -> None:
         self.save_dir = save_dir
         self.model_name = model_name
         self.ckpt_name = ckpt_name
         self.data_split = data_split
+        self.train_condition = train_condition
+        self.eval_reactive = eval_reactive
         config_name = [f for f in os.listdir(save_dir + model_name + "/") if (".npz" in f) and (model_name in f)][0]
 
         train_config, data_config, net_config = self._load_config(save_dir, model_name, config_name)
@@ -68,11 +67,11 @@ class DeepScenarioEvaluation:
         # planning eval
         self.time_of_interest = self.current_frame + np.arange(1, 13)
         self.planning_metrics_holder = PlanningMetric(len(self.time_of_interest))
-        self.planning_metrics_results_list = []
         self.target_pred_metrics_holder = PredMetric()
-        self.target_pred_metrics_results_list = []
+        self.target_offroad_metrics_holder = OffroadMetric()
+        self.target_comfort_metrics_holder = ComfortMetric(dt=1.0 / self.sample_frequency)
         self.scene_pred_metrics_holder = PredMetric()
-        self.scene_pred_metrics_results_list = []
+        self.metrics_writer = MetricsWriter(os.path.join(save_dir, model_name, f"{ckpt_name}_eval_metrics.jsonl"))
 
     @staticmethod
     def _load_config(
@@ -125,13 +124,16 @@ class DeepScenarioEvaluation:
 
     def quant_evaluate(self) -> None:
         data_list = []
+        print(self.model_name)
+        print("Eval Reactive:", self.eval_reactive)
+        print("T_sim:", self.num_future_steps/(self.num_eval_recurr_steps*self.sample_frequency))
         for i, sample in enumerate(self.data_loader):
             data = self.data_loader.process_sample(sample)
             data = append_one_for_single_batch(data)
             data_list.append(data)
         
             if (i + 1) % self.batch_size == 0 or (i + 1) == len(self.data_loader):
-                print(i)
+                # print(i)
                 batch_data = {}
                 for k in data_list[0].keys():
                     batch_data[k] = torch.cat([d[k] for d in data_list], dim=0)
@@ -139,38 +141,20 @@ class DeepScenarioEvaluation:
                 self._evaluate_batch(batch_data)
                 data_list = []
 
-        if self.use_target_net:
-            min_plan_metrics_1 = self.planning_metrics_holder.compute(n=1)
-            min_plan_metrics_5 = self.planning_metrics_holder.compute(n=5)
-            planning_metrics = {
-                "min_col_1": min_plan_metrics_1["box_col_percent"].cpu().numpy().tolist(),
-                "min_l2_1": min_plan_metrics_1["L2"].cpu().numpy().tolist(),
-                "min_col_5": min_plan_metrics_5["box_col_percent"].cpu().numpy().tolist(),
-                "min_l2_5": min_plan_metrics_5["L2"].cpu().numpy().tolist(),
-            }
-            self.planning_metrics_results_list.append(planning_metrics)
-            print(planning_metrics)
-            min_ade_1, min_fde_1 = self.target_pred_metrics_holder.compute(n=1)
-            min_ade_5, min_fde_5 = self.target_pred_metrics_holder.compute(n=5)
-            target_pred_metrics = { # same structure as nuscenes
-                "MinFDEK" : {"RowMean": [min_fde_1.item(), min_fde_5.item(), -1]},
-                "MinADEK" : {"RowMean": [min_ade_1.item(), min_ade_5.item(), -1]},
-                "MissRateTopK_2" : {"RowMean": [-1, -1, -1]},
-                "OffRoadRate": {"RowMean": [-1,]},
-                }
-            self.target_pred_metrics_results_list.append(target_pred_metrics)
-            print(target_pred_metrics)  
-
-        if self.use_scene_net:
-            min_ade_1, min_fde_1 = self.scene_pred_metrics_holder.compute(n=1)
-            scene_pred_metrics = {
-                "min_ade_1": min_ade_1.item(),
-                "min_fde_1": min_fde_1.item()
-            }
-            self.scene_pred_metrics_results_list.append(scene_pred_metrics)
-            print(scene_pred_metrics)            
-                
-        self._save_predictions()
+        record = build_metrics_record(
+            checkpoint=self.ckpt_name,
+            model_name=self.model_name,
+            data_split=self.data_split,
+            tsim=self.num_sim_steps / self.sample_frequency,
+            train_condition=self.train_condition,
+            eval_reactive=self.eval_reactive,
+            planning_metrics_holder=self.planning_metrics_holder if self.use_target_net else None,
+            target_pred_metrics_holder=self.target_pred_metrics_holder if self.use_target_net else None,
+            target_offroad_metrics_holder=self.target_offroad_metrics_holder if self.use_target_net else None,
+            target_comfort_metrics_holder=self.target_comfort_metrics_holder if self.use_target_net else None,
+            scene_pred_metrics_holder=self.scene_pred_metrics_holder if self.use_scene_net else None,
+        )
+        self.metrics_writer.write(record)
 
     def _evaluate_batch(self, data: Dict, indices: Optional[List[int]] = None, visualize_type: Optional[str] = None) -> None:
         DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -178,10 +162,15 @@ class DeepScenarioEvaluation:
         data = combine_batch_elements_dim(data)
         if self.use_target_net and not self.use_scene_net:
             sim_mask = data["agents_target_mask"].bool() # (A,)
+            assert not self.eval_reactive
         elif not self.use_target_net and self.use_scene_net:
             sim_mask = ~(data["agents_target_mask"].bool()) # (A,)
         elif self.use_target_net and self.use_scene_net:
-           sim_mask = torch.ones_like(data["agents_target_mask"], dtype=torch.bool) # (A,)
+            if self.eval_reactive:
+                sim_mask = torch.ones_like(data["agents_target_mask"], dtype=torch.bool) # (A,)
+            else:
+                sim_mask = data["agents_target_mask"].bool() # (A,)
+                
         else:
             raise ValueError("Neither of the Networks are used in training")
 
@@ -257,16 +246,51 @@ class DeepScenarioEvaluation:
                 
                 cl_traj_target = cl_last_pos_mu_local_detached[target_agent_mask]  # (A_target, M, T, 2)
                 self.target_pred_metrics_holder.update(cl_traj_target, gt_target, gt_target_reg_mask, pi_target)
+                self.target_offroad_metrics_holder.update(cl_traj_target, gt_target_reg_mask, pi_target,
+                                                    data['lanes_start_locs'], data['lanes_end_locs'],
+                                                    data['agents_batch'][target_agent_mask], 
+                                                    data['lanes_batch'])
+                self.target_comfort_metrics_holder.update(cl_traj_target, gt_target_reg_mask, pi_target)
                 
                 # compute plan metrics in a vcs_head0 coordinate system
+                # get the GT information
                 unbatched_data = unbatch_and_pad(data)
                 B = unbatched_data["agents_position"].shape[0]
                 assert pi_target.shape[0] == B
+                others_gt_trajs = torch.concat(
+                        [unbatched_data["agents_position"][:, 1:, self.time_of_interest, :2],
+                        unbatched_data["agents_heading_rad"][:, 1:, self.time_of_interest, None]],
+                        dim=-1)
 
+                # get the ego closed-loop trajectory with all the modes
                 cl_last_pos_head_mu_vcs_detached_target = torch.concat(
                     [cl_last_pos_mu_vcs_detached, cl_last_head_mu_vcs_detached.unsqueeze(-1)], 
                     dim=-1)[target_agent_mask]
                 assert cl_last_pos_head_mu_vcs_detached_target.shape[0] == B
+                
+                # Get the surrounding-agent closed-loop trajectories, one per ego mode.
+                # The surrounding-agent network head is still genuinely single-mode --
+                # scene_num_modes == 1, asserted below -- the divergence across m comes purely
+                # from reacting to a different ego trajectory per mode, not from the
+                # surrounding-agent model itself being multi-modal.
+                if self.eval_reactive:
+                    assert sim_mask.all() 
+                    assert self.net_config.scene_num_modes == 1
+                    others_trajs_per_mode = []
+                    for mode_data in data_sim_modes_list:
+                        unbatched_mode = unbatch_and_pad(mode_data)
+                        B_ = unbatched_mode["agents_position"].shape[0]
+                        assert B == B_
+                        others_trajs_per_mode.append(
+                            torch.concat(
+                                [unbatched_mode["agents_position"][:, 1:, self.time_of_interest, :2],
+                                unbatched_mode["agents_heading_rad"][:, 1:, self.time_of_interest, None]],
+                                dim=-1
+                            )
+                        )  # each: (B, n_agents, T, 3)
+                    others_trajs = torch.stack(others_trajs_per_mode, dim=2)  # (B, n_agents, M, T, 3)
+                else:
+                    others_trajs = others_gt_trajs.unsqueeze(2).expand(-1, -1, self.max_num_modes, -1, -1)
                 
                 self.planning_metrics_holder.update(
                     ego_trajs=cl_last_pos_head_mu_vcs_detached_target[:, :, self.time_of_interest - self.current_frame - 1, :],
@@ -277,10 +301,8 @@ class DeepScenarioEvaluation:
                         dim=-1),
                     ego_wh_trajs=unbatched_data["agents_size"][:, 0, self.time_of_interest, :2],
                     ego_gt_trajs_mask=unbatched_data["agents_log_reg_mask"][:, 0, self.time_of_interest],
-                    others_gt_trajs=torch.concat(
-                        [unbatched_data["agents_position"][:, 1:, self.time_of_interest, :2],
-                        unbatched_data["agents_heading_rad"][:, 1:, self.time_of_interest, None]],
-                        dim=-1),
+                    others_trajs=others_trajs,
+                    others_gt_trajs=others_gt_trajs,
                     others_wh_trajs=unbatched_data["agents_size"][:, 1:, self.time_of_interest, :2],
                     others_gt_trajs_mask=unbatched_data["agents_log_reg_mask"][:, 1:, self.time_of_interest],
                 )
@@ -323,11 +345,17 @@ class DeepScenarioEvaluation:
             traj_vcs_pos_sim_unbatched[batch_indices, element_indices] = cl_last_pos_mu_vcs_detached
 
             if self.use_target_net and not self.use_scene_net:
-                sim_mask_unbatched = unbatched_data["agents_target_mask"].bool() 
+                sim_mask_unbatched = unbatched_data["agents_target_mask"].bool()
+                assert not self.eval_reactive
             elif not self.use_target_net and self.use_scene_net:
                 sim_mask_unbatched = ~(unbatched_data["agents_target_mask"].bool())
             elif self.use_target_net and self.use_scene_net:
-                sim_mask_unbatched = torch.ones_like(unbatched_data["agents_target_mask"].bool())
+                if self.eval_reactive:
+                    sim_mask_unbatched = torch.ones_like(unbatched_data["agents_target_mask"].bool())
+                else:
+                    sim_mask_unbatched = unbatched_data["agents_target_mask"].bool()
+            else:
+                raise ValueError("Neither of the Networks are used in training")
 
             unbatched_data = change_device_of_dict(unbatched_data, torch.device("cpu"))
             pi_unbatched = pi_unbatched.cpu()
@@ -343,22 +371,27 @@ class DeepScenarioEvaluation:
                 prediction_sample = traj_vcs_pos_sim_unbatched[sample_idx]
                 pi_sample = pi_unbatched[sample_idx]
 
-                traj_vcs_pos_sample = prediction_sample[sim_mask_sample]
-                pi_sample = pi_sample[sim_mask_sample]
-                self.visualization_vcs(
-                    token=str(np.random.rand()), data_vcs=data_sample, traj_vcs=traj_vcs_pos_sample, pi=pi_sample
-                )
+                traj_vcs_pos_sample = prediction_sample[sim_mask_sample]  # (A_sim, M, T, 2)
+                pi_sample = pi_sample[sim_mask_sample]  # (A_sim, M)
 
-    def _save_predictions(self):
-        name = (
-            self.ckpt_name + "_" + str(self.data_split) + "_" + str(self.num_sim_steps / self.sample_frequency) + "secs"
-        )
-        path = self.save_dir + self.model_name + "/"
-        if self.use_target_net:
-            json.dump(self.target_pred_metrics_results_list, open(os.path.join(path, name + "_pred_metrics.json"), "w"))
-            json.dump(self.planning_metrics_results_list, open(os.path.join(path, name + "_plan_metrics.json"), "w"))
-        if self.use_scene_net:
-            json.dump(self.scene_pred_metrics_results_list, open(os.path.join(path, name + "_scene_pred_metrics.json"), "w"))
+                if self.eval_reactive:
+                    assert sim_mask_unbatched.all()
+                    # Under reactive eval, mode m's surrounding-agent trajectories are a real
+                    # reaction to ego's mode-m plan specifically , so plot each mode separately.
+                    for m in range(self.max_num_modes):
+                        self.visualization_vcs(
+                            token=f"{np.random.rand()}_mode{m}",
+                            data_vcs=data_sample,
+                            traj_vcs=traj_vcs_pos_sample[:, m : m + 1, :, :],
+                            pi=pi_sample[:, m : m + 1],
+                        )
+                else:
+                    # Log-replay: surrounding agents' single trajectory is the same background
+                    # regardless of which ego mode is shown, so all ego modes can still be
+                    # meaningfully overlaid in one combined plot, as before.
+                    self.visualization_vcs(
+                        token=str(np.random.rand()), data_vcs=data_sample, traj_vcs=traj_vcs_pos_sample, pi=pi_sample
+                    )
 
     def visualization_vcs(
         self,
@@ -387,8 +420,9 @@ class DeepScenarioEvaluation:
         self.data_loader.visualize_training_sample(data_vcs, dynamic_patch_polygon, static_patch_polygon, vis_bb=False)
 
         # visualize multimodal predictions
+        num_modes_to_plot = traj_vcs.shape[1]
         for agent in range(traj_vcs.shape[0]):
-            for m in range(self.max_num_modes):
+            for m in range(num_modes_to_plot):
                 prediction = traj_vcs[agent, m]
                 probability = pi[agent, m].item()
                 ckpt_name = self.ckpt_name
@@ -430,19 +464,21 @@ class DeepScenarioEvaluation:
 
 
 if __name__ == "__main__":
+    train_condition = "reactive" # "non-reactive", reactive refers to when scene network is used
+    eval_reactive = True # True is the scene network is used
     ckpt_names = [
-        "*****.ckpt"
+        "******.ckpt"
     ]
 
     save_dir = SAVE_PATH
     batch_size = TrainingConfig().batch_size
     data_split = "val"
-    for num_eval_recurr_steps in [1, 3]:
+    for num_eval_recurr_steps in [1, 2, 3, 4, 6, 12]:
         for ckpt_name in ckpt_names:
             model_name = ckpt_name.split("-epoch")[0]
             track_eval = DeepScenarioEvaluation(
                 data_split, save_dir, model_name, ckpt_name, num_eval_recurr_steps=num_eval_recurr_steps,
-                batch_size=batch_size,
+                batch_size=batch_size, train_condition=train_condition, eval_reactive=eval_reactive,
             )
             track_eval.quant_evaluate()
             track_eval.qual_evaluate()

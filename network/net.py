@@ -302,8 +302,8 @@ class Net(LightningModule):
             pi_target = pi[target_agent_mask]
 
             self.pred_metrics_holder.update(ol_traj_target, gt_target, gt_target_reg_mask, pi_target)
-            min_ade_1, min_fde_1 = self.pred_metrics_holder.compute(n=1)
-            min_ade_5, min_fde_5 = self.pred_metrics_holder.compute(n=5)
+            min_ade_1, min_fde_1, mr_1 = self.pred_metrics_holder.compute(n=1)
+            min_ade_5, min_fde_5, mr_5 = self.pred_metrics_holder.compute(n=5)
             self.pred_metrics_holder.reset()
             self.log(f"val_minADE_1", min_ade_1, sync_dist=True, batch_size=1, prog_bar=True)
             self.log(f"val_minADE", min_ade_5, sync_dist=True, batch_size=1, prog_bar=True)
@@ -313,8 +313,8 @@ class Net(LightningModule):
             # compute the close loop prediction metrics in GT's local coordinate frame
             cl_traj_target = cl_last_pos_mu_local_detached[target_agent_mask]  # (A_target, M, T, 2)
             self.pred_metrics_holder.update(cl_traj_target, gt_target, gt_target_reg_mask, pi_target)
-            min_ade_1, min_fde_1 = self.pred_metrics_holder.compute(n=1)
-            min_ade_5, min_fde_5 = self.pred_metrics_holder.compute(n=5)
+            min_ade_1, min_fde_1, mr_1 = self.pred_metrics_holder.compute(n=1)
+            min_ade_5, min_fde_5, mr_5 = self.pred_metrics_holder.compute(n=5)
             self.pred_metrics_holder.reset()
             self.log(f"val_minADE_1_cl", min_ade_1, sync_dist=True, batch_size=1, prog_bar=True)
             self.log(f"val_minADE_cl", min_ade_5, sync_dist=True, batch_size=1, prog_bar=True)
@@ -349,12 +349,12 @@ class Net(LightningModule):
             )
             min_plan_metrics_1 = self.planning_metrics_holder.compute(n=1)
             self.planning_metrics_holder.reset()
-            self.log(f"val_min_col_1sec_1_cl", min_plan_metrics_1["box_col_percent"][0], sync_dist=True, batch_size=1, prog_bar=True)
-            self.log(f"val_min_col_3sec_1_cl", min_plan_metrics_1["box_col_percent"][1], sync_dist=True, batch_size=1, prog_bar=True)
-            self.log(f"val_min_col_6sec_1_cl", min_plan_metrics_1["box_col_percent"][2], sync_dist=True, batch_size=1, prog_bar=True)
-            self.log(f"val_min_l2_1sec_1_cl", min_plan_metrics_1["L2"][0], sync_dist=True, batch_size=1, prog_bar=True)
-            self.log(f"val_min_l2_3sec_1_cl", min_plan_metrics_1["L2"][1], sync_dist=True, batch_size=1, prog_bar=True)
-            self.log(f"val_min_l2_6sec_1_cl", min_plan_metrics_1["L2"][2], sync_dist=True, batch_size=1, prog_bar=True)
+            self.log(f"val_min_col_1sec_1_cl", min_plan_metrics_1["mean_box_col_percent"][0], sync_dist=True, batch_size=1, prog_bar=True)
+            self.log(f"val_min_col_3sec_1_cl", min_plan_metrics_1["mean_box_col_percent"][1], sync_dist=True, batch_size=1, prog_bar=True)
+            self.log(f"val_min_col_6sec_1_cl", min_plan_metrics_1["mean_box_col_percent"][2], sync_dist=True, batch_size=1, prog_bar=True)
+            self.log(f"val_min_l2_1sec_1_cl", min_plan_metrics_1["min_L2"][0], sync_dist=True, batch_size=1, prog_bar=True)
+            self.log(f"val_min_l2_3sec_1_cl", min_plan_metrics_1["min_L2"][1], sync_dist=True, batch_size=1, prog_bar=True)
+            self.log(f"val_min_l2_6sec_1_cl", min_plan_metrics_1["min_L2"][2], sync_dist=True, batch_size=1, prog_bar=True)
         
         if self.use_scene_net:
             surr_agents_sim_mask = data["agents_surr_sim_mask"].bool() # (A,)
@@ -392,7 +392,7 @@ class Net(LightningModule):
                 pi_surr = pi[surr_agents_sim_mask]
 
                 self.pred_metrics_holder.update(ol_traj_surr, gt_surr, gt_surr_reg_mask, pi_surr)
-                min_ade_1, min_fde_1 = self.pred_metrics_holder.compute(n=1)
+                min_ade_1, min_fde_1, mr_1 = self.pred_metrics_holder.compute(n=1)
                 self.pred_metrics_holder.reset()
                 self.log(f"scene_val_minADE_1", min_ade_1, sync_dist=True, batch_size=1, prog_bar=True)
                 self.log(f"scene_val_minFDE_1", min_fde_1, sync_dist=True, batch_size=1, prog_bar=True)
@@ -400,7 +400,7 @@ class Net(LightningModule):
                 # compute the close loop prediction metrics in GT's local coordinate frame
                 cl_traj_surr = cl_last_pos_mu_local_detached[surr_agents_sim_mask]  # (A_surr, M, T, 2)
                 self.pred_metrics_holder.update(cl_traj_surr, gt_surr, gt_surr_reg_mask, pi_surr)
-                min_ade_1, min_fde_1 = self.pred_metrics_holder.compute(n=1)
+                min_ade_1, min_fde_1, mr_1 = self.pred_metrics_holder.compute(n=1)
                 self.pred_metrics_holder.reset()
                 self.log(f"scene_val_minADE_1_cl", min_ade_1, sync_dist=True, batch_size=1, prog_bar=True)
                 self.log(f"scene_val_minFDE_1_cl", min_fde_1, sync_dist=True, batch_size=1, prog_bar=True)

@@ -1,8 +1,9 @@
-# Goal-Oriented Reactive Simulation for Closed-Loop Trajectory Prediction
+# Closed-Loop Trajectory Prediction
 
-This repository contains the official implementation for the paper "Goal-Oriented Reactive Simulation for Closed-Loop Trajectory Prediction". This work introduces an on-policy, closed-loop training paradigm optimized for high-frequency, receding horizon ego prediction. By employing a goal-oriented scene decoder, we create reactive surrounding agents. Our setup allows the ego to learn recovery behaviors from its own execution errors, while grounding ego prediction in realistic traffic interactions. Extensive evaluations demonstrate that this closed-loop approach significantly enhances collision avoidance compared to traditional open-loop baselines.
+This repository contains the official implementation for the paper "Stop the Gradient: On-Policy Closed-Loop Training for Multimodal
+Trajectory Prediction". This work introduces an on-policy, closed-loop training paradigm optimized for high-frequency, receding horizon ego prediction. Our setup allows the ego to learn recovery behaviors from its own execution errors, aiming to reduce the covarite shift that happens during the deployment of trajectory prediction models. Extensive evaluations demonstrate that this closed-loop approach significantly enhances collision avoidance compared to traditional open-loop baselines.
 
-![Architecture Overview](Close_Loop-Reactive_simulation.png)
+![Architecture Overview](Closed_loop-simulator.png)
 
 ## Environment Generation
 
@@ -154,17 +155,15 @@ python evaluate/evaluate.py
 python evaluate/evaluate_deep_scenario.py
 ```
 
-*Note: The nuScenes evaluation currently happens with one sample at a time, whereas the DeepScenario evaluation processes multiple samples simultaneously. You may parallelize the nuScenes evaluation to run similarly to the DeepScenario implementation.*
-
 ## Citation
 
 If you find this work useful in your research, please consider citing our paper:
 
 ```bibtex
-@article{yadav2026goal,
-      title={Goal-Oriented Reactive Simulation for Closed-Loop Trajectory Prediction}, 
-      author={Harsh Yadav and Tobias Meisen},
-      journal={arXiv preprint arXiv:2603.24155},
+@article{yadav2026stop,
+      title={Stop the Gradient: On-Policy Closed-Loop Training for Multimodal Trajectory Prediction}, 
+      author={Harsh Yadav, Christian Bohn and Tobias Meisen},
+      journal={https://arxiv.org/pdf/2603.23393},
       year={2026},
 }
 ```

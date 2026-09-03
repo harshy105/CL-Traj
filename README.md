@@ -157,13 +157,4 @@ python evaluate/evaluate_deep_scenario.py
 
 ## Citation
 
-If you find this work useful in your research, please consider citing our paper:
-
-```bibtex
-@article{yadav2026stop,
-      title={Stop the Gradient: On-Policy Closed-Loop Training for Multimodal Trajectory Prediction}, 
-      author={Harsh Yadav, Christian Bohn and Tobias Meisen},
-      journal={https://arxiv.org/pdf/2603.23393},
-      year={2026},
-}
-```
+Will be added after the publication
